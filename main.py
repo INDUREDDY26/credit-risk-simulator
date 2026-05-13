@@ -1,7 +1,32 @@
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
-from decision_engine import make_decision
 from audit_log import log_decision
+import os
+import joblib
+import pandas as pd
+from sqlalchemy import text
+
+
+# Train model on startup if .pkl doesn't exist
+if not os.path.exists("credit_model.pkl"):
+    print("Model not found — training now...")
+    from database import engine
+    from sklearn.linear_model import LogisticRegression
+
+    with engine.connect() as conn:
+        df = pd.read_sql(text("SELECT * FROM applicants"), conn)
+
+    X = df[["income", "credit_score", "debt_to_income", "loan_amount"]]
+    y = df["label"]
+
+    model = LogisticRegression()
+    model.fit(X, y)
+    joblib.dump(model, "credit_model.pkl")
+    print("Model trained and saved.")
+
+# Now safe to import decision engine (pkl exists)
+from decision_engine import make_decision
+
 
 app = FastAPI(
     title="Credit Risk Decisioning Simulator",
@@ -10,13 +35,12 @@ app = FastAPI(
 )
 
 
-# Step 1: Define what an applicant request looks like
 class ApplicantInput(BaseModel):
     income: float
     credit_score: int
     debt_to_income: float
     loan_amount: float
-    applicant_id: int = None  # optional — if pulling from DB
+    applicant_id: int = None
 
     class Config:
         json_schema_extra = {
@@ -29,7 +53,6 @@ class ApplicantInput(BaseModel):
         }
 
 
-# Step 2: Health check endpoint — confirms API is running
 @app.get("/")
 def root():
     return {
@@ -39,13 +62,11 @@ def root():
     }
 
 
-# Step 3: Main decision endpoint
 @app.post("/decide")
 def decide(
     applicant: ApplicantInput,
     mode: str = Query(default="model", enum=["model", "rules"])
 ):
-    # Convert to plain dict
     applicant_dict = {
         "income": applicant.income,
         "credit_score": applicant.credit_score,
@@ -53,13 +74,9 @@ def decide(
         "loan_amount": applicant.loan_amount
     }
 
-    # Run decision engine
     result = make_decision(applicant_dict, mode=mode)
-
-    # Log to PostgreSQL
     log_decision(applicant_dict, result, applicant_id=applicant.applicant_id)
 
-    # Return structured response
     return {
         "decision": result["decision"],
         "model_score": result["model_score"],
